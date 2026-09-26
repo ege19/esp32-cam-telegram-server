@@ -5,17 +5,11 @@
 
 #define FLASH_PIN 4
 
-// ---------------------------
-// User config
-// ---------------------------
 const char* WIFI_SSID = "Palabıyık";
 const char* WIFI_PASSWORD = "19831983";
 const char* BOT_TOKEN = "8827031277:AAHx9HntnJI8UJXuex-cm1T760fJTuFtDo4";
 const char* CHAT_ID = "6798340496";
 
-// ---------------------------
-// Camera pins for AI-Thinker ESP32-CAM
-// ---------------------------
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -34,106 +28,58 @@ const char* CHAT_ID = "6798340496";
 #define PCLK_GPIO_NUM     22
 
 WebServer server(80);
+bool flashOn = false;
 
 struct CameraSettings {
   int brightness = 0;
   int contrast = 0;
   int saturation = 0;
   int sharpness = 0;
-  int quality = 10;
+  int quality = 20;
   int framesize = FRAMESIZE_VGA;
-  bool hmirror = false;
-  bool vflip = false;
 };
 
 CameraSettings cameraSettings;
-
-String frameSizeName(int index) {
-  switch (index) {
-    case FRAMESIZE_96X96: return "96x96";
-    case FRAMESIZE_QQVGA: return "160x120";
-    case FRAMESIZE_QCIF: return "176x144";
-    case FRAMESIZE_HQVGA: return "240x176";
-    case FRAMESIZE_240X240: return "240x240";
-    case FRAMESIZE_QVGA: return "320x240";
-    case FRAMESIZE_CIF: return "400x296";
-    case FRAMESIZE_HVGA: return "480x320";
-    case FRAMESIZE_VGA: return "640x480";
-    case FRAMESIZE_SVGA: return "800x600";
-    case FRAMESIZE_XGA: return "1024x768";
-    case FRAMESIZE_HD: return "1280x720";
-    case FRAMESIZE_SXGA: return "1280x1024";
-    case FRAMESIZE_UXGA: return "1600x1200";
-    default: return "640x480";
-  }
-}
+unsigned long uptime = 0;
+uint32_t frameCounter = 0;
+unsigned long lastFrameTime = 0;
 
 void applyCameraSettings() {
   sensor_t* sensor = esp_camera_sensor_get();
   if (!sensor) return;
-
   sensor->set_brightness(sensor, cameraSettings.brightness);
   sensor->set_contrast(sensor, cameraSettings.contrast);
   sensor->set_saturation(sensor, cameraSettings.saturation);
   sensor->set_sharpness(sensor, cameraSettings.sharpness);
   sensor->set_quality(sensor, cameraSettings.quality);
   sensor->set_framesize(sensor, (framesize_t)cameraSettings.framesize);
-  sensor->set_hmirror(sensor, cameraSettings.hmirror);
-  sensor->set_vflip(sensor, cameraSettings.vflip);
 }
 
 void setFlash(bool enable) {
   pinMode(FLASH_PIN, OUTPUT);
   digitalWrite(FLASH_PIN, enable ? HIGH : LOW);
+  flashOn = enable;
 }
 
-bool sendPhotoToTelegram(const uint8_t* payload, size_t payloadLen, const char* fileName) {
+bool sendPhotoToTelegram(const uint8_t* payload, size_t payloadLen) {
   WiFiClientSecure client;
   client.setInsecure();
+  
+  if (!client.connect("api.telegram.org", 443)) return false;
 
-  if (!client.connect("api.telegram.org", 443)) {
-    Serial.println("Telegram connect failed");
-    return false;
-  }
-
-  String boundary = "----ESP32CAMBoundary";
-  String body = "";
-  body += "--" + boundary + "\r\n";
-  body += "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
-  body += String(CHAT_ID);
-  body += "\r\n--" + boundary + "\r\n";
-  body += "Content-Disposition: form-data; name=\"photo\"; filename=\"" + String(fileName) + "\"\r\n";
-  body += "Content-Type: image/jpeg\r\n\r\n";
-
+  String boundary = "----ESP32CAM";
+  String body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n" + String(CHAT_ID) + "\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
   String endBoundary = "\r\n--" + boundary + "--\r\n";
   size_t contentLength = body.length() + payloadLen + endBoundary.length();
 
-  client.print("POST /bot");
-  client.print(BOT_TOKEN);
-  client.println("/sendPhoto HTTP/1.1");
-  client.println("Host: api.telegram.org");
-  client.println("Content-Type: multipart/form-data; boundary=" + boundary);
-  client.println("Connection: close");
-  client.print("Content-Length: ");
-  client.println(String(contentLength));
-  client.println();
-
+  client.print("POST /bot" + String(BOT_TOKEN) + "/sendPhoto HTTP/1.1\r\nHost: api.telegram.org\r\nContent-Type: multipart/form-data; boundary=" + boundary + "\r\nConnection: close\r\nContent-Length: " + String(contentLength) + "\r\n\r\n");
   client.print(body);
   client.write(payload, payloadLen);
   client.print(endBoundary);
 
   delay(1000);
-
   String response = "";
-  while (client.connected() || client.available()) {
-    char c = client.read();
-    if (c != -1) response += c;
-    else break;
-  }
-
-  Serial.println("Telegram response:");
-  Serial.println(response.substring(0, 300));
-
+  while (client.available()) response += (char)client.read();
   return response.indexOf("\"ok\":true") > -1;
 }
 
@@ -196,6 +142,8 @@ void handleRoot() {
       display: flex;
       flex-direction: column;
       gap: 16px;
+      max-height: 90vh;
+      overflow-y: auto;
     }
 
     h2 {
@@ -223,11 +171,7 @@ void handleRoot() {
       font-weight: 700;
     }
 
-    input[type="range"] {
-      width: 100%;
-      accent-color: var(--accent);
-    }
-
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
     select {
       width: 100%;
       background: #1d2d42;
@@ -240,7 +184,7 @@ void handleRoot() {
 
     .buttons {
       display: grid;
-      grid-template-columns: repeat(2, minmax(120px, 1fr));
+      grid-template-columns: repeat(2, 1fr);
       gap: 10px;
     }
 
@@ -251,12 +195,14 @@ void handleRoot() {
       font-weight: 700;
       cursor: pointer;
       color: white;
-      transition: transform 0.15s ease, opacity 0.15s ease;
+      transition: transform 0.15s ease;
       box-shadow: 0 10px 20px rgba(0,0,0,0.15);
+      font-size: 0.85rem;
     }
 
     button:hover { transform: translateY(-1px); }
     button:active { transform: translateY(1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .primary { background: linear-gradient(135deg, var(--accent), #3ea5ff); }
     .warning { background: linear-gradient(135deg, var(--warning), #ff9d5c); color: #1d1d1d; }
@@ -281,15 +227,18 @@ void handleRoot() {
       justify-content: center;
       align-items: center;
       min-height: 520px;
+      overflow: hidden;
     }
 
     #liveFeed {
       width: 100%;
+      height: 100%;
       max-height: 76vh;
       object-fit: contain;
       background: #000;
       border-radius: 16px;
       border: 1px solid rgba(255,255,255,0.08);
+      display: block;
     }
 
     .status {
@@ -298,15 +247,35 @@ void handleRoot() {
       gap: 12px;
       flex-wrap: wrap;
       color: var(--muted);
-      font-size: 0.85rem;
+      font-size: 0.8rem;
     }
 
     .pill {
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.06);
       border-radius: 999px;
-      padding: 8px 12px;
+      padding: 6px 12px;
+      font-size: 0.8rem;
     }
+
+    .info-panel {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.04);
+      border-radius: 12px;
+      padding: 12px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.02);
+    }
+
+    .info-row:last-child { border-bottom: none; }
 
     @media (max-width: 860px) {
       .app { grid-template-columns: 1fr; }
@@ -340,32 +309,45 @@ void handleRoot() {
       </div>
 
       <div class="setting">
-        <label>Kalite <span class="value" id="qualityValue">10</span></label>
-        <input type="range" id="quality" min="10" max="63" value="10">
+        <label>Kalite <span class="value" id="qualityValue">20</span></label>
+        <input type="range" id="quality" min="10" max="63" value="20">
       </div>
 
       <div class="setting">
         <label>Piksel Boyutu</label>
         <select id="framesize">
-          <option value="7">160x120</option>
-          <option value="8">240x240</option>
+          <option value="12" selected>640x480</option>
           <option value="9">320x240</option>
-          <option value="10">400x296</option>
-          <option value="11">480x320</option>
-          <option value="12">640x480</option>
+          <option value="7">160x120</option>
           <option value="13">800x600</option>
-          <option value="14">1024x768</option>
           <option value="15">1280x720</option>
-          <option value="16">1280x1024</option>
-          <option value="17">1600x1200</option>
         </select>
       </div>
 
       <div class="buttons">
-        <button class="success" onclick="toggleFlash()">Flaş</button>
-        <button class="primary" onclick="capturePhoto(false)">Fotoğraf Çek</button>
-        <button class="warning" onclick="capturePhoto(true)">Flaşlı Foto</button>
-        <button class="danger" onclick="refreshFeed()">Yenile</button>
+        <button class="success" id="flashBtn" onclick="toggleFlash()">Flaş</button>
+        <button class="primary" onclick="capturePhoto(false)">Fotoğraf</button>
+        <button class="warning" onclick="capturePhoto(true)">Flaşlı</button>
+        <button class="danger" onclick="location.reload()">Yenile</button>
+      </div>
+
+      <div class="info-panel">
+        <div class="info-row">
+          <span>Uptime:</span>
+          <span id="uptime">--</span>
+        </div>
+        <div class="info-row">
+          <span>FPS:</span>
+          <span id="fps">--</span>
+        </div>
+        <div class="info-row">
+          <span>RAM:</span>
+          <span id="ram">--</span>
+        </div>
+        <div class="info-row">
+          <span>WiFi:</span>
+          <span id="wifi">--</span>
+        </div>
       </div>
     </aside>
 
@@ -375,35 +357,35 @@ void handleRoot() {
         <span class="pill" id="statusText">Canlı Yayın</span>
       </div>
       <div class="stream-wrap">
-        <img id="liveFeed" src="/cam.jpg?ts=0" alt="Live camera stream">
+        <img id="liveFeed" src="/stream.mjpg" alt="Live camera stream">
       </div>
     </main>
   </div>
 
   <script>
+    let settingsTimer = null;
+    
     function updateValue(id, value) {
       const el = document.getElementById(id + 'Value');
       if (el) el.textContent = value;
     }
 
     function applySettings() {
-      const params = [];
-      ['brightness','contrast','saturation','sharpness','quality','framesize'].forEach((key) => {
-        const el = document.getElementById(key);
-        if (el) {
-          updateValue(key, el.value);
-          params.push(`${key}=${encodeURIComponent(el.value)}`);
-        }
-      });
-
-      fetch('/settings?' + params.join('&'))
-        .then(res => res.text())
-        .catch(err => console.error(err));
+      clearTimeout(settingsTimer);
+      settingsTimer = setTimeout(() => {
+        const params = [];
+        ['brightness','contrast','saturation','sharpness','quality','framesize'].forEach((key) => {
+          const el = document.getElementById(key);
+          if (el) {
+            updateValue(key, el.value);
+            params.push(`${key}=${el.value}`);
+          }
+        });
+        fetch('/settings?' + params.join('&')).catch(err => {});
+      }, 300);
     }
 
-    [
-      'brightness','contrast','saturation','sharpness','quality','framesize'
-    ].forEach((id) => {
+    ['brightness','contrast','saturation','sharpness','quality','framesize'].forEach((id) => {
       const el = document.getElementById(id);
       if (el) {
         el.addEventListener('input', applySettings);
@@ -411,35 +393,38 @@ void handleRoot() {
       }
     });
 
-    function refreshFeed() {
-      const img = document.getElementById('liveFeed');
-      img.src = '/cam.jpg?ts=' + Date.now();
-    }
-
     function toggleFlash() {
-      fetch('/flash?state=' + (document.getElementById('statusText').textContent.includes('Flaş açık') ? 0 : 1))
-        .then(res => res.text())
+      const btn = document.getElementById('flashBtn');
+      btn.disabled = true;
+      fetch('/flash?state=' + (document.getElementById('statusText').textContent.includes('Flaş') ? 0 : 1))
         .then(() => {
           const s = document.getElementById('statusText');
-          s.textContent = s.textContent.includes('Flaş açık') ? 'Canlı Yayın' : 'Flaş açık';
-        });
+          s.textContent = s.textContent.includes('Flaş') ? 'Canlı Yayın' : 'Flaş Açık';
+          btn.disabled = false;
+        }).catch(() => { btn.disabled = false; });
     }
 
     function capturePhoto(flash) {
       const url = flash ? '/capture?flash=1' : '/capture';
-      document.getElementById('statusText').textContent = 'Foto çekiliyor...';
-      fetch(url)
-        .then(res => res.text())
-        .then(() => {
-          document.getElementById('statusText').textContent = 'Fotoğraf gönderildi';
-          setTimeout(refreshFeed, 300);
-        })
-        .catch(() => {
-          document.getElementById('statusText').textContent = 'Hata';
-        });
+      document.getElementById('statusText').textContent = 'Çekiliyor...';
+      fetch(url).then(() => {
+        document.getElementById('statusText').textContent = 'Gönderildi ✓';
+        setTimeout(() => { document.getElementById('statusText').textContent = 'Canlı Yayın'; }, 2000);
+      }).catch(() => {
+        document.getElementById('statusText').textContent = 'Hata!';
+        setTimeout(() => { document.getElementById('statusText').textContent = 'Canlı Yayın'; }, 2000);
+      });
     }
 
-    setInterval(refreshFeed, 200);
+    setInterval(() => {
+      fetch('/info').then(r => r.json()).then(d => {
+        document.getElementById('uptime').textContent = d.uptime || '--';
+        document.getElementById('fps').textContent = d.fps || '--';
+        document.getElementById('ram').textContent = d.ram || '--';
+        document.getElementById('wifi').textContent = d.wifi + ' dBm' || '--';
+      }).catch(() => {});
+    }, 1000);
+
     applySettings();
   </script>
 </body>
@@ -449,15 +434,38 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+void handleStream() {
+  server.sendHeader("Content-Type", "multipart/x-mixed-replace;boundary=frame");
+  server.send(200);
+  
+  WiFiClient client = server.client();
+  while (client.connected()) {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+      delay(5);
+      continue;
+    }
+
+    String head = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + String(fb->len) + "\r\n\r\n";
+    client.write((uint8_t*)head.c_str(), head.length());
+    client.write(fb->buf, fb->len);
+    client.write((uint8_t*)"\r\n", 2);
+    
+    esp_camera_fb_return(fb);
+    frameCounter++;
+    lastFrameTime = millis();
+
+    if (!client.connected()) break;
+  }
+}
+
 void handleSettings() {
   if (server.hasArg("brightness")) cameraSettings.brightness = server.arg("brightness").toInt();
   if (server.hasArg("contrast")) cameraSettings.contrast = server.arg("contrast").toInt();
   if (server.hasArg("saturation")) cameraSettings.saturation = server.arg("saturation").toInt();
   if (server.hasArg("sharpness")) cameraSettings.sharpness = server.arg("sharpness").toInt();
   if (server.hasArg("quality")) cameraSettings.quality = server.arg("quality").toInt();
-  if (server.hasArg("framesize")) {
-    cameraSettings.framesize = server.arg("framesize").toInt();
-  }
+  if (server.hasArg("framesize")) cameraSettings.framesize = server.arg("framesize").toInt();
   applyCameraSettings();
   server.send(200, "text/plain", "OK");
 }
@@ -466,36 +474,12 @@ void handleFlash() {
   if (server.hasArg("state")) {
     bool on = server.arg("state") == "1";
     setFlash(on);
-    server.send(200, "text/plain", on ? "FLASH_ON" : "FLASH_OFF");
-    return;
   }
-  server.send(200, "text/plain", "NO_STATE");
-}
-
-void handleCamJpg() {
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    server.send(503, "text/plain", "Camera capture failed");
-    return;
-  }
-
-  server.sendHeader("Content-Type", "image/jpeg");
-  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "0");
-  server.setContentLength(fb->len);
-  server.send(200, "image/jpeg", "");
-  WiFiClient client = server.client();
-  if (client.connected()) {
-    client.write(fb->buf, fb->len);
-  }
-  esp_camera_fb_return(fb);
+  server.send(200, "text/plain", flashOn ? "ON" : "OFF");
 }
 
 void handleCapture() {
-  const bool flashRequested = server.hasArg("flash") && server.arg("flash") == "1";
-
+  bool flashRequested = server.hasArg("flash") && server.arg("flash") == "1";
   if (flashRequested) {
     setFlash(true);
     delay(120);
@@ -504,45 +488,60 @@ void handleCapture() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     if (flashRequested) setFlash(false);
-    server.send(503, "text/plain", "Camera capture failed");
+    server.send(503, "text/plain", "Capture failed");
     return;
   }
 
-  bool sent = sendPhotoToTelegram(fb->buf, fb->len, "esp32cam_photo.jpg");
+  bool sent = sendPhotoToTelegram(fb->buf, fb->len);
+  if (flashRequested) setFlash(false);
 
-  if (flashRequested) {
-    setFlash(false);
-  }
-
-  String result = sent ? "PHOTO_SENT" : "PHOTO_FAILED";
-  server.send(200, "text/plain", result);
+  server.send(200, "text/plain", sent ? "SENT" : "FAILED");
   esp_camera_fb_return(fb);
+}
+
+void handleInfo() {
+  unsigned long now = millis();
+  unsigned long uptime = now / 1000;
+  int hours = uptime / 3600;
+  int mins = (uptime % 3600) / 60;
+  int secs = uptime % 60;
+  
+  float fps = frameCounter > 0 ? (frameCounter * 1000.0f) / now : 0;
+  uint32_t freeMem = esp_get_free_heap_size();
+  uint32_t totalMem = esp_get_heap_size();
+  int memPercent = (freeMem * 100) / totalMem;
+  int rssi = WiFi.RSSI();
+
+  String json = "{\"uptime\":\"" + String(hours) + "h " + String(mins) + "m\",";
+  json += "\"fps\":" + String((int)fps) + ",";
+  json += "\"ram\":\"" + String(memPercent) + "%\",";
+  json += "\"wifi\":" + String(rssi) + "}";
+
+  server.send(200, "application/json", json);
 }
 
 void setup() {
   Serial.begin(115200);
-
+  delay(1000);
+  
   pinMode(FLASH_PIN, OUTPUT);
   digitalWrite(FLASH_PIN, LOW);
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, LOW);
+  delay(500);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.print("Connecting to WiFi");
+  
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < 40) {
     delay(500);
-    Serial.print(".");
     tries++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
-  } else {
-    Serial.println();
-    Serial.println("WiFi did not connect");
   }
 
   camera_config_t config;
@@ -567,37 +566,27 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = 20;
   config.fb_count = 2;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.grab_mode = CAMERA_GRAB_LATEST;
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x\n", err);
-    return;
-  }
-
+  esp_camera_init(&config);
   sensor_t* sensor = esp_camera_sensor_get();
   if (sensor) {
     sensor->set_vflip(sensor, 1);
     sensor->set_hmirror(sensor, 1);
-    sensor->set_brightness(sensor, 0);
-    sensor->set_contrast(sensor, 0);
-    sensor->set_saturation(sensor, 0);
-    sensor->set_sharpness(sensor, 0);
   }
 
-  cameraSettings.framesize = FRAMESIZE_VGA;
-  cameraSettings.quality = 10;
-  applyCameraSettings();
-
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/stream.mjpg", HTTP_GET, handleStream);
   server.on("/settings", HTTP_GET, handleSettings);
   server.on("/flash", HTTP_GET, handleFlash);
   server.on("/capture", HTTP_GET, handleCapture);
-  server.on("/cam.jpg", HTTP_GET, handleCamJpg);
+  server.on("/info", HTTP_GET, handleInfo);
 
   server.begin();
-  Serial.println("Web server started");
+  Serial.println("Server started");
 }
 
 void loop() {
